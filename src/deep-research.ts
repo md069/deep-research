@@ -6,6 +6,13 @@ import { z } from 'zod';
 
 import { o3MiniModel, trimPrompt } from './ai/providers';
 import { systemPrompt } from './prompt';
+import { executeWithRateLimitRetry } from './retryFirecrawl';
+
+export const Metrics = {
+  startTime: Date.now(),
+  openAiCalls: 0,
+  firecrawlCalls: 0,
+};
 
 type ResearchResult = {
   learnings: string[];
@@ -34,6 +41,8 @@ async function generateSerpQueries({
   // optional, if provided, the research will continue from the last learning
   learnings?: string[];
 }) {
+  Metrics.openAiCalls++;
+  
   const res = await generateObject({
     model: o3MiniModel,
     system: systemPrompt(),
@@ -83,6 +92,8 @@ async function processSerpResult({
   );
   console.log(`Ran ${query}, found ${contents.length} contents`);
 
+  Metrics.openAiCalls++;
+
   const res = await generateObject({
     model: o3MiniModel,
     abortSignal: AbortSignal.timeout(60_000),
@@ -125,6 +136,8 @@ export async function writeFinalReport({
     150_000,
   );
 
+  Metrics.openAiCalls++;
+
   const res = await generateObject({
     model: o3MiniModel,
     system: systemPrompt(),
@@ -165,11 +178,15 @@ export async function deepResearch({
     serpQueries.map(serpQuery =>
       limit(async () => {
         try {
-          const result = await firecrawl.search(serpQuery.query, {
-            timeout: 15000,
-            limit: 5,
-            scrapeOptions: { formats: ['markdown'] },
-          });
+          Metrics.firecrawlCalls++;
+          
+          const result = await executeWithRateLimitRetry(() =>
+            firecrawl.search(serpQuery.query, {
+              timeout: 15000,
+              limit: 5,
+              scrapeOptions: { formats: ['markdown'] },
+            })
+          );
 
           // Collect URLs from this search
           const newUrls = compact(result.data.map(item => item.url));
@@ -228,5 +245,15 @@ export async function deepResearch({
   return {
     learnings: [...new Set(results.flatMap(r => r.learnings))],
     visitedUrls: [...new Set(results.flatMap(r => r.visitedUrls))],
+  };
+}
+
+export function getMetricsReport() {
+  const elapsedTimeMs = Date.now() - Metrics.startTime;
+  return {
+    elapsedTimeMs,
+    elapsedTimeFormatted: `${(elapsedTimeMs / 1000).toFixed(2)}s`,
+    openAiCalls: Metrics.openAiCalls,
+    firecrawlCalls: Metrics.firecrawlCalls,
   };
 }
