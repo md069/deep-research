@@ -1,7 +1,7 @@
 import * as fs from 'fs/promises';
 import * as readline from 'readline';
 
-import { deepResearch, writeFinalReport } from './deep-research';
+import { deepResearch, writeFinalReport, getMetricsReport } from './deep-research';
 import { generateFeedback } from './feedback';
 
 const rl = readline.createInterface({
@@ -87,6 +87,14 @@ ${followUpQuestions.map((q, i) => `Q: ${q}\nA: ${answers[i]}`).join('\n')}
 
   console.log(`\n\nFinal Report:\n\n${report}`);
   console.log('\nReport has been saved to output.md');
+
+  // Log the collected metrics
+  const metrics = getMetricsReport();
+  console.log(`\nMetrics:
+  - Elapsed Time: ${metrics.elapsedTimeFormatted}
+  - OpenAI API Calls: ${metrics.openAiCalls}
+  - Firecrawl API Calls: ${metrics.firecrawlCalls}`);
+
   rl.close();
 }
 

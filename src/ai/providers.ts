@@ -13,12 +13,12 @@ const openai = createOpenAI({
   baseURL: process.env.OPENAI_ENDPOINT || 'https://api.openai.com/v1',
 } as CustomOpenAIProviderSettings);
 
-const customModel = process.env.OPENAI_MODEL || 'gpt-4o';
+const customModel = process.env.OPENAI_MODEL || 'o3-mini';
 
 // Models
 
 export const o3MiniModel = openai(customModel, {
-  reasoningEffort: customModel.startsWith('o') ? 'medium' : undefined,
+  reasoningEffort: customModel.startsWith('o3') ? 'medium' : undefined,
   structuredOutputs: true,
 });
 
