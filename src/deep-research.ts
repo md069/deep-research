@@ -18,10 +18,15 @@ export const Metrics = {
   firecrawlCalls: 0,
 };
 
+export type LearningDetail = {
+  learning: string;
+  sourceUrl: string;
+};
+
 export type ContributionDetail = {
   query: string;
   researchGoal: string;
-  learnings: string[];
+  learnings: LearningDetail[];
   sourceUrls: string[];
   subContributions?: ContributionDetail[];
 };
@@ -37,7 +42,7 @@ export type ResearchProgress = {
 };
 
 type ResearchResult = {
-  learnings: string[];
+  learnings: LearningDetail[];
   visitedUrls: string[];
   breakdown: ContributionDetail[];
 };
@@ -59,7 +64,7 @@ async function generateSerpQueries({
 }: {
   query: string;
   numQueries?: number;
-  learnings?: string[];
+  learnings?: LearningDetail[];
 }) {
   Metrics.openAiCalls++;
   
@@ -68,7 +73,7 @@ async function generateSerpQueries({
     system: systemPrompt(),
     prompt: `Given the following prompt from the user, generate a list of SERP queries to research the topic. Return a maximum of ${numQueries} queries, but feel free to return less if the original prompt is clear. Make sure each query is unique and not similar to each other: <prompt>${query}</prompt>\n\n${
       learnings
-        ? `Here are some learnings from previous research, use them to generate more specific queries: ${learnings.join(
+        ? `Here are some learnings from previous research, use them to generate more specific queries: ${learnings.map(l => l.learning).join(
             '\n',
           )}`
         : ''
@@ -99,7 +104,6 @@ async function generateSerpQueries({
 async function processSerpResult({
   query,
   result,
-  numLearnings = 3,
   numFollowUpQuestions = 3,
 }: {
   query: string;
@@ -107,35 +111,54 @@ async function processSerpResult({
   numLearnings?: number;
   numFollowUpQuestions?: number;
 }) {
-  const contents = compact(result.data.map(item => item.markdown)).map(
-    content => trimPrompt(content, 25_000),
-  );
-  console.log(`Ran ${query}, found ${contents.length} contents`);
+  // Create an array of content objects with their associated URLs
+  const contentDetails = compact(result.data.map(item => {
+    if (!item.markdown || !item.url) return null;
+    return { url: item.url, content: trimPrompt(item.markdown, 25_000) };
+  }));
 
+  console.log(`Ran ${query}, found ${contentDetails.length} content items`);
+
+  // Generate a learning for each content item individually
+  const detailedLearnings = await Promise.all(
+    contentDetails.map(detail =>
+      generateLearningForContent(detail.content, detail.url)
+    )
+  );
+
+  // Generate follow-up questions using aggregated content
+  const aggregatedContents = contentDetails
+    .map(cd => `<content>\n${cd.content}\n</content>`)
+    .join('\n');
+  const followUpRes = await generateObject({
+    model: o3MiniModel,
+    abortSignal: AbortSignal.timeout(60_000),
+    system: systemPrompt(),
+    prompt: `Given the aggregated contents from a SERP search for the query <query>${query}</query>, generate a list of follow-up questions to further research the topic:\n\n<contents>\n${aggregatedContents}\n</contents>`,
+    schema: z.object({
+      followUpQuestions: z.array(z.string()).describe(`List of follow-up questions`),
+    }),
+  });
+
+  console.log(`Created ${detailedLearnings.length} learnings from individual contents`);
+  return {
+    learnings: detailedLearnings,
+    followUpQuestions: followUpRes.object.followUpQuestions,
+  };
+}
+
+async function generateLearningForContent(content: string, url: string): Promise<LearningDetail> {
+  Metrics.openAiCalls++;
   const res = await generateObject({
     model: o3MiniModel,
     abortSignal: AbortSignal.timeout(60_000),
     system: systemPrompt(),
-    prompt: `Given the following contents from a SERP search for the query <query>${query}</query>, generate a list of learnings from the contents. Return a maximum of ${numLearnings} learnings, but feel free to return less if the contents are clear. Make sure each learning is unique and not similar to each other. The learnings should be concise and to the point, as detailed and information dense as possible. Make sure to include any entities like people, places, companies, products, things, etc in the learnings, as well as any exact metrics, numbers, or dates. The learnings will be used to research the topic further.\n\n<contents>${contents
-      .map(content => `<content>\n${content}\n</content>`)
-      .join('\n')}</contents>`,
+    prompt: `Given the following content fetched from <url>${url}</url>, extract a concise yet detailed learning. Include key entities, metrics, and dates if present.\n\n<content>\n${content}\n</content>`,
     schema: z.object({
-      learnings: z
-        .array(z.string())
-        .describe(`List of learnings, max of ${numLearnings}`),
-      followUpQuestions: z
-        .array(z.string())
-        .describe(
-          `List of follow-up questions to research the topic further, max of ${numFollowUpQuestions}`,
-        ),
+      learning: z.string().describe('Extracted learning from the individual content'),
     }),
   });
-  console.log(
-    `Created ${res.object.learnings.length} learnings`,
-    res.object.learnings,
-  );
-
-  return res.object;
+  return { learning: res.object.learning, sourceUrl: url };
 }
 
 export async function writeFinalReport({
@@ -144,12 +167,19 @@ export async function writeFinalReport({
   visitedUrls,
 }: {
   prompt: string;
-  learnings: string[];
+  learnings: LearningDetail[];
   visitedUrls: string[];
 }) {
+  // Create a map of URLs to citation numbers
+  const urlToCitation = new Map<string, number>();
+  visitedUrls.forEach((url, index) => {
+    urlToCitation.set(url, index + 1);
+  });
+
+  // Format each learning with its numbered citation
   const learningsString = trimPrompt(
     learnings
-      .map(learning => `<learning>\n${learning}\n</learning>`)
+      .map(ld => `<learning>\n${ld.learning} [${urlToCitation.get(ld.sourceUrl)}]\n</learning>`)
       .join('\n'),
     150_000,
   );
@@ -157,17 +187,18 @@ export async function writeFinalReport({
   const res = await generateObject({
     model: o3MiniModel,
     system: systemPrompt(),
-    prompt: `Given the following prompt from the user, write a final report on the topic using the learnings from research. Make it as as detailed as possible, aim for 3 or more pages, include ALL the learnings from research:\n\n<prompt>${prompt}</prompt>\n\nHere are all the learnings from previous research:\n\n<learnings>\n${learningsString}\n</learnings>`,
+    prompt: `Given the following prompt from the user, write a final report on the topic using the learnings below. The report should be detailed (at least 3 pages) and include all learnings with their numbered citations (e.g. [1], [2], etc.) inline where appropriate. Each fact or learning should be followed by its citation number in square brackets.\n\n<prompt>${prompt}</prompt>\n\nLearnings:\n\n<learnings>\n${learningsString}\n</learnings>`,
     schema: z.object({
-      reportMarkdown: z
-        .string()
-        .describe('Final report on the topic in Markdown'),
+      reportMarkdown: z.string().describe('Final report on the topic in Markdown'),
     }),
   });
 
-  // Append the visited URLs section to the report
-  const urlsSection = `\n\n## Sources\n\n${visitedUrls.map(url => `- ${url}`).join('\n')}`;
-  return res.object.reportMarkdown + urlsSection;
+  // Create a numbered reference list
+  const referencesSection = `\n\n## References\n\n${visitedUrls
+    .map((url, index) => `${index + 1}. ${url}`)
+    .join('\n')}`;
+
+  return res.object.reportMarkdown + referencesSection;
 }
 
 export async function deepResearch({
@@ -181,7 +212,7 @@ export async function deepResearch({
   query: string;
   breadth: number;
   depth: number;
-  learnings?: string[];
+  learnings?: LearningDetail[];
   visitedUrls?: string[];
   onProgress?: (progress: ResearchProgress) => void;
 }): Promise<ResearchResult> {

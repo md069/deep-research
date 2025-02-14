@@ -3,7 +3,8 @@
 import { useState, useEffect, useRef } from 'react';
 import ReactMarkdown from 'react-markdown';
 
-import { ContributionDetail, ResearchProgress } from '../../deep-research';
+import { ContributionDetail, LearningDetail } from '../deep-research';
+import type { ResearchProgress } from '../deep-research';
 
 type Step = 'home' | 'questions' | 'researching' | 'report';
 
@@ -49,15 +50,18 @@ function ContributionPanel({ contribution }: { contribution: ContributionDetail 
           <div>
             <h4 className="text-sm font-medium text-slate-700 mb-2">Learnings:</h4>
             <ul className="list-disc pl-5 space-y-2 text-sm text-slate-600">
-              {contribution.learnings.map((learning: string, idx: number) => (
-                <li key={idx}>{learning}</li>
+              {contribution.learnings.map((item, idx) => (
+                <li key={idx} className="flex flex-col gap-1">
+                  <span>{item.learning}</span>
+                  <small className="text-xs text-gray-500">Source: <a href={item.sourceUrl} target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:text-blue-600 hover:underline">[{idx + 1}]</a></small>
+                </li>
               ))}
             </ul>
           </div>
           <div>
             <h4 className="text-sm font-medium text-slate-700 mb-2">Sources:</h4>
             <ul className="list-disc pl-5 space-y-1 text-sm">
-              {contribution.sourceUrls.map((url: string, idx: number) => (
+              {contribution.sourceUrls.map((url, idx) => (
                 <li key={idx}>
                   <a
                     href={url}
@@ -140,7 +144,7 @@ export default function Home() {
   const [questions, setQuestions] = useState<string[]>([]);
   const [answers, setAnswers] = useState<string[]>([]);
   const [report, setReport] = useState('');
-  const [learnings, setLearnings] = useState<string[]>([]);
+  const [learnings, setLearnings] = useState<LearningDetail[]>([]);
   const [visitedUrls, setVisitedUrls] = useState<string[]>([]);
   const [error, setError] = useState('');
   const [researchState, setResearchState] = useState<ResearchState>({
@@ -150,6 +154,7 @@ export default function Home() {
   });
 
   const eventSourceRef = useRef<EventSource | null>(null);
+  const pdfContentRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     return () => {
@@ -265,6 +270,21 @@ export default function Home() {
     } catch (err) {
       setError(err instanceof Error ? err.message : 'An error occurred');
       setStep('home');
+    }
+  };
+
+  // Function to download the report as a PDF using html2pdf.js
+  const downloadPDF = async () => {
+    if (pdfContentRef.current) {
+      const html2pdf = (await import('html2pdf.js')).default;
+      const opt = {
+        margin: 0.5,
+        filename: 'research-report.pdf',
+        image: { type: 'jpeg', quality: 0.98 },
+        html2canvas: { scale: 2, useCORS: true },
+        jsPDF: { unit: 'in', format: 'letter', orientation: 'portrait' }
+      };
+      html2pdf().set(opt).from(pdfContentRef.current).save();
     }
   };
 
@@ -480,80 +500,99 @@ export default function Home() {
 
       {step === 'report' && (
         <div className="max-w-4xl mx-auto">
-          <div className="relative bg-white/90 backdrop-blur-sm p-8 sm:p-10 rounded-xl shadow-xl shadow-slate-200/40 transition-all border border-slate-200/50">
-            <div className="absolute inset-0 bg-gradient-to-br from-slate-50/50 via-white/80 to-sky-50/30 rounded-xl" />
-            <div className="relative">
-              <div className="flex items-center gap-3 mb-2">
-                <svg className="w-8 h-8 text-blue-600" viewBox="0 0 24 24" fill="none" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
-                </svg>
-                <h2 className="text-3xl font-bold bg-gradient-to-r from-slate-900 to-slate-700 bg-clip-text text-transparent">Research Report</h2>
-              </div>
-              <p className="text-slate-500 mb-8">Here's what we found based on your query</p>
-              
-              <div className="prose prose-lg max-w-none prose-headings:text-slate-900 prose-p:text-slate-600 prose-a:text-blue-600 hover:prose-a:text-blue-700 prose-strong:text-slate-700 prose-code:text-blue-600 prose-pre:bg-slate-50/50 prose-pre:backdrop-blur-sm prose-img:rounded-lg prose-hr:border-slate-200">
-                <ReactMarkdown>{report}</ReactMarkdown>
-              </div>
-              
-              <div className="mt-8 space-y-6">
-                <div className="bg-slate-50/50 backdrop-blur-sm rounded-lg p-6 border border-slate-200/50">
-                  <h3 className="text-lg font-semibold text-slate-900 mb-4">Key Learnings</h3>
-                  <ul className="space-y-2">
-                    {learnings.map((learning, idx) => (
-                      <li key={idx} className="flex gap-2 text-slate-700">
-                        <span className="text-blue-600">•</span>
-                        {learning}
-                      </li>
-                    ))}
-                  </ul>
+          {/* Wrap the report content that should be converted to PDF */}
+          <div ref={pdfContentRef}>
+            <div className="relative bg-white/90 backdrop-blur-sm p-8 sm:p-10 rounded-xl shadow-xl shadow-slate-200/40 transition-all border border-slate-200/50">
+              <div className="absolute inset-0 bg-gradient-to-br from-slate-50/50 via-white/80 to-sky-50/30 rounded-xl" />
+              <div className="relative">
+                <div className="flex items-center gap-3 mb-2">
+                  <svg className="w-8 h-8 text-blue-600" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+                  </svg>
+                  <h2 className="text-3xl font-bold bg-gradient-to-r from-slate-900 to-slate-700 bg-clip-text text-transparent">Research Report</h2>
+                </div>
+                <p className="text-slate-500 mb-8">Here's what we found based on your query</p>
+                
+                <div className="prose prose-lg max-w-none prose-headings:text-slate-900 prose-p:text-slate-600 prose-a:text-blue-600 hover:prose-a:text-blue-700 prose-strong:text-slate-700 prose-code:text-blue-600 prose-pre:bg-slate-50/50 prose-pre:backdrop-blur-sm prose-img:rounded-lg prose-hr:border-slate-200">
+                  <ReactMarkdown>{report}</ReactMarkdown>
                 </div>
                 
-                <div className="bg-slate-50/50 backdrop-blur-sm rounded-lg p-6 border border-slate-200/50">
-                  <h3 className="text-lg font-semibold text-slate-900 mb-4">Sources</h3>
-                  <ul className="space-y-2">
-                    {visitedUrls.map((url, idx) => (
-                      <li key={idx}>
-                        <a
-                          href={url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-blue-600 hover:text-blue-700 hover:underline break-all"
-                        >
-                          {url}
-                        </a>
-                      </li>
-                    ))}
-                  </ul>
+                <div className="mt-8 space-y-6">
+                  <div className="bg-slate-50/50 backdrop-blur-sm rounded-lg p-6 border border-slate-200/50">
+                    <h3 className="text-lg font-semibold text-slate-900 mb-4">Key Learnings</h3>
+                    <ul className="space-y-2">
+                      {learnings.map((item, idx) => (
+                        <li key={idx} className="flex flex-col gap-1 text-slate-700">
+                          <div className="flex gap-2">
+                            <span className="text-blue-600">•</span>
+                            <span>{item.learning}</span>
+                          </div>
+                          <small className="text-xs text-gray-500 ml-4">Source: <a href={item.sourceUrl} target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:text-blue-600 hover:underline">[{idx + 1}]</a></small>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                  
+                  <div className="bg-slate-50/50 backdrop-blur-sm rounded-lg p-6 border border-slate-200/50">
+                    <h3 className="text-lg font-semibold text-slate-900 mb-4">Sources</h3>
+                    <ul className="space-y-2">
+                      {visitedUrls.map((url, idx) => (
+                        <li key={idx}>
+                          <a
+                            href={url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-blue-600 hover:text-blue-700 hover:underline break-all"
+                          >
+                            {url}
+                          </a>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
                 </div>
               </div>
-
-              <div className="mt-10 flex justify-center">
-                <button
-                  onClick={() => {
-                    setStep('home');
-                    setQuery('');
-                    setReport('');
-                    setLearnings([]);
-                    setVisitedUrls([]);
-                    setError('');
-                    setResearchState({
-                      depth: { current: 0, total: 0 },
-                      breadth: { current: 0, total: 0 },
-                      queries: { completed: 0, total: 0 },
-                    });
-                  }}
-                  className="group relative overflow-hidden bg-gradient-to-r from-blue-600 to-blue-700 text-white py-3 px-8 rounded-lg hover:from-blue-700 hover:to-blue-800 focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:ring-offset-2 transition-all font-medium shadow-lg shadow-blue-500/20"
-                >
-                  <div className="absolute inset-0 bg-[conic-gradient(from_0deg_at_50%_50%,blue_0deg,sky_120deg,indigo_240deg,blue_360deg)] opacity-0 group-hover:opacity-20 group-focus:opacity-40 transition-opacity animate-spin-slow" />
-                  <span className="relative flex items-center gap-2">
-                    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v3m0 0v3m0-3h3m-3 0H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z" />
-                    </svg>
-                    New Research
-                  </span>
-                </button>
-              </div>
             </div>
+          </div>
+
+          {/* Buttons to download PDF and start new research */}
+          <div className="mt-10 flex justify-center gap-4">
+            <button
+              onClick={downloadPDF}
+              className="group relative overflow-hidden bg-gradient-to-r from-green-600 to-green-700 text-white py-3 px-8 rounded-lg hover:from-green-700 hover:to-green-800 focus:outline-none focus:ring-2 focus:ring-green-500/50 focus:ring-offset-2 transition-all font-medium shadow-lg shadow-green-500/20"
+            >
+              <div className="absolute inset-0 bg-[conic-gradient(from_0deg_at_50%_50%,green_0deg,teal_120deg,cyan_240deg,green_360deg)] opacity-0 group-hover:opacity-20 group-focus:opacity-40 transition-opacity animate-spin-slow" />
+              <span className="relative flex items-center gap-2">
+                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3M3 17V7a2 2 0 012-2h6l2 2h6a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z" />
+                </svg>
+                Download PDF
+              </span>
+            </button>
+            <button
+              onClick={() => {
+                setStep('home');
+                setQuery('');
+                setReport('');
+                setLearnings([]);
+                setVisitedUrls([]);
+                setError('');
+                setResearchState({
+                  depth: { current: 0, total: 0 },
+                  breadth: { current: 0, total: 0 },
+                  queries: { completed: 0, total: 0 },
+                });
+              }}
+              className="group relative overflow-hidden bg-gradient-to-r from-blue-600 to-blue-700 text-white py-3 px-8 rounded-lg hover:from-blue-700 hover:to-blue-800 focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:ring-offset-2 transition-all font-medium shadow-lg shadow-blue-500/20"
+            >
+              <div className="absolute inset-0 bg-[conic-gradient(from_0deg_at_50%_50%,blue_0deg,sky_120deg,indigo_240deg,blue_360deg)] opacity-0 group-hover:opacity-20 group-focus:opacity-40 transition-opacity animate-spin-slow" />
+              <span className="relative flex items-center gap-2">
+                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v3m0 0v3m0-3h3m-3 0H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                New Research
+              </span>
+            </button>
           </div>
         </div>
       )}

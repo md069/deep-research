@@ -1,7 +1,8 @@
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
+import * as fs from 'fs/promises';
 
-import { deepResearch, writeFinalReport, cleanup, ResearchProgress, ContributionDetail } from '../../../deep-research';
+import { deepResearch, writeFinalReport, cleanup, ResearchProgress, ContributionDetail, LearningDetail } from '../../../deep-research';
 import { generateFeedback } from '../../../feedback';
 
 const researchSchema = z.object({
@@ -20,7 +21,7 @@ type ResultUpdate = {
   type: 'result';
   data: {
     report: string;
-    learnings: string[];
+    learnings: LearningDetail[];
     visitedUrls: string[];
     breakdown: ContributionDetail[];
   };
@@ -103,9 +104,19 @@ export async function GET(request: Request) {
         // Generate the final report
         const report = await writeFinalReport({
           prompt: combinedQuery,
-          learnings: researchResult.learnings,
-          visitedUrls: researchResult.visitedUrls,
+          learnings: researchResult!.learnings,
+          visitedUrls: researchResult!.visitedUrls,
         });
+
+        // Save the report to a Markdown file.
+        // First, try to extract a title from the report (assumes first markdown header is the title)
+        const titleMatch = report.match(/^#\s+(.*)/m);
+        const titleForFile = titleMatch?.[1]?.trim() || validQuery;
+        // Create a safe filename by replacing non-alphanumeric characters. You can also append a timestamp if needed.
+        const safeReportName = titleForFile.replace(/[^a-z0-9]+/gi, '-').toLowerCase();
+        const filename = `${safeReportName || 'report'}.md`;
+        await fs.writeFile(filename, report, 'utf-8');
+        console.log(`Report saved as ${filename}`);
 
         // Send the final result
         await sendUpdate({
@@ -201,9 +212,18 @@ export async function POST(request: Request) {
         // Generate the final report
         const report = await writeFinalReport({
           prompt: combinedQuery,
-          learnings: researchResult.learnings,
-          visitedUrls: researchResult.visitedUrls,
+          learnings: researchResult!.learnings,
+          visitedUrls: researchResult!.visitedUrls,
         });
+
+        // Save the report to a Markdown file.
+        // Extract the title from the report (if available) or fallback to the research query.
+        const titleMatch = report.match(/^#\s+(.*)/m);
+        const titleForFile = titleMatch?.[1]?.trim() || query;
+        const safeReportName = titleForFile.replace(/[^a-z0-9]+/gi, '-').toLowerCase();
+        const filename = `${safeReportName || 'report'}.md`;
+        await fs.writeFile(filename, report, 'utf-8');
+        console.log(`Report saved as ${filename}`);
 
         // Send the final result
         await sendUpdate({
