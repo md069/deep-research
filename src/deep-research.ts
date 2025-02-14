@@ -7,6 +7,10 @@ import { z } from 'zod';
 import { o3MiniModel, trimPrompt } from './ai/providers';
 import { systemPrompt } from './prompt';
 import { executeWithRateLimitRetry } from './retryFirecrawl';
+import { ProgressManager } from './progress-manager';
+
+// Initialize progress manager for coordinated progress display
+const progress = new ProgressManager();
 
 export const Metrics = {
   startTime: Date.now(),
@@ -14,16 +18,34 @@ export const Metrics = {
   firecrawlCalls: 0,
 };
 
+export type ContributionDetail = {
+  query: string;
+  researchGoal: string;
+  learnings: string[];
+  sourceUrls: string[];
+  subContributions?: ContributionDetail[];
+};
+
+export type ResearchProgress = {
+  currentDepth: number;
+  totalDepth: number;
+  currentBreadth: number;
+  totalBreadth: number;
+  currentQuery?: string;
+  totalQueries: number;
+  completedQueries: number;
+};
+
 type ResearchResult = {
   learnings: string[];
   visitedUrls: string[];
+  breakdown: ContributionDetail[];
 };
 
 // increase this if you have higher API rate limits
 const ConcurrencyLimit = 2;
 
 // Initialize Firecrawl with optional API key and optional base url
-
 const firecrawl = new FirecrawlApp({
   apiKey: process.env.FIRECRAWL_KEY ?? '',
   apiUrl: process.env.FIRECRAWL_BASE_URL,
@@ -37,8 +59,6 @@ async function generateSerpQueries({
 }: {
   query: string;
   numQueries?: number;
-
-  // optional, if provided, the research will continue from the last learning
   learnings?: string[];
 }) {
   Metrics.openAiCalls++;
@@ -92,8 +112,6 @@ async function processSerpResult({
   );
   console.log(`Ran ${query}, found ${contents.length} contents`);
 
-  Metrics.openAiCalls++;
-
   const res = await generateObject({
     model: o3MiniModel,
     abortSignal: AbortSignal.timeout(60_000),
@@ -136,8 +154,6 @@ export async function writeFinalReport({
     150_000,
   );
 
-  Metrics.openAiCalls++;
-
   const res = await generateObject({
     model: o3MiniModel,
     system: systemPrompt(),
@@ -160,33 +176,52 @@ export async function deepResearch({
   depth,
   learnings = [],
   visitedUrls = [],
+  onProgress,
 }: {
   query: string;
   breadth: number;
   depth: number;
   learnings?: string[];
   visitedUrls?: string[];
+  onProgress?: (progress: ResearchProgress) => void;
 }): Promise<ResearchResult> {
+  const currentProgress: ResearchProgress = {
+    currentDepth: depth,
+    totalDepth: depth,
+    currentBreadth: breadth,
+    totalBreadth: breadth,
+    totalQueries: 0,
+    completedQueries: 0,
+  };
+  
+  const reportProgress = (update: Partial<ResearchProgress>) => {
+    Object.assign(currentProgress, update);
+    onProgress?.(currentProgress);
+    progress.updateProgress(currentProgress);
+  };
+
   const serpQueries = await generateSerpQueries({
     query,
     learnings,
     numQueries: breadth,
   });
+  
+  reportProgress({
+    totalQueries: serpQueries.length,
+    currentQuery: serpQueries[0]?.query
+  });
+  
   const limit = pLimit(ConcurrencyLimit);
 
   const results = await Promise.all(
     serpQueries.map(serpQuery =>
       limit(async () => {
         try {
-          Metrics.firecrawlCalls++;
-          
-          const result = await executeWithRateLimitRetry(() =>
-            firecrawl.search(serpQuery.query, {
-              timeout: 15000,
-              limit: 5,
-              scrapeOptions: { formats: ['markdown'] },
-            })
-          );
+          const result = await firecrawl.search(serpQuery.query, {
+            timeout: 15000,
+            limit: 5,
+            scrapeOptions: { formats: ['markdown'] },
+          });
 
           // Collect URLs from this search
           const newUrls = compact(result.data.map(item => item.url));
@@ -201,41 +236,67 @@ export async function deepResearch({
           const allLearnings = [...learnings, ...newLearnings.learnings];
           const allUrls = [...visitedUrls, ...newUrls];
 
+          const contribution: ContributionDetail = {
+            query: serpQuery.query,
+            researchGoal: serpQuery.researchGoal,
+            learnings: newLearnings.learnings,
+            sourceUrls: newUrls,
+          };
+
           if (newDepth > 0) {
             console.log(
               `Researching deeper, breadth: ${newBreadth}, depth: ${newDepth}`,
             );
+
+            reportProgress({
+              currentDepth: newDepth,
+              currentBreadth: newBreadth,
+              completedQueries: currentProgress.completedQueries + 1,
+              currentQuery: serpQuery.query,
+            });
 
             const nextQuery = `
             Previous research goal: ${serpQuery.researchGoal}
             Follow-up research directions: ${newLearnings.followUpQuestions.map(q => `\n${q}`).join('')}
           `.trim();
 
-            return deepResearch({
+            const deeperResult = await deepResearch({
               query: nextQuery,
               breadth: newBreadth,
               depth: newDepth,
               learnings: allLearnings,
               visitedUrls: allUrls,
+              onProgress,
             });
+
+            contribution.subContributions = deeperResult.breakdown;
+
+            return deeperResult;
           } else {
+            reportProgress({
+              currentDepth: 0,
+              completedQueries: currentProgress.completedQueries + 1,
+              currentQuery: serpQuery.query,
+            });
             return {
               learnings: allLearnings,
               visitedUrls: allUrls,
+              breakdown: [contribution],
             };
           }
         } catch (e: any) {
           if (e.message && e.message.includes('Timeout')) {
-            console.error(
+            console.log(
               `Timeout error running query: ${serpQuery.query}: `,
               e,
             );
           } else {
-            console.error(`Error running query: ${serpQuery.query}: `, e);
+            console.log(`Error running query: ${serpQuery.query}: `, e);
           }
           return {
             learnings: [],
             visitedUrls: [],
+            breakdown: [],
           };
         }
       }),
@@ -245,6 +306,7 @@ export async function deepResearch({
   return {
     learnings: [...new Set(results.flatMap(r => r.learnings))],
     visitedUrls: [...new Set(results.flatMap(r => r.visitedUrls))],
+    breakdown: results.flatMap(r => r.breakdown),
   };
 }
 
@@ -256,4 +318,9 @@ export function getMetricsReport() {
     openAiCalls: Metrics.openAiCalls,
     firecrawlCalls: Metrics.firecrawlCalls,
   };
+}
+
+// Add cleanup function for the progress display
+export function cleanup() {
+  progress.stop();
 }

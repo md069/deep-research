@@ -21,7 +21,12 @@ module.exports = {
           },
         },
       },
+      animation: {
+        'spin-slow': 'spin 8s linear infinite',
+      },
     },
   },
-  plugins: [require('@tailwindcss/typography')],
+  plugins: [
+    require('@tailwindcss/typography'),
+  ],
 }; 
