@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
 import * as fs from 'fs/promises';
+import crypto from 'crypto';
 
 import { deepResearch, writeFinalReport, cleanup, ResearchProgress, ContributionDetail, LearningDetail } from '../../../deep-research';
 import { generateFeedback } from '../../../feedback';
@@ -12,54 +13,36 @@ const researchSchema = z.object({
   feedback: z.string().optional(),
 });
 
-type ProgressUpdate = {
-  type: 'progress';
-  data: ResearchProgress;
-};
+export type ResearchUpdate = 
+  | { type: 'progress'; data: ResearchProgress }
+  | { type: 'result'; data: { report: string; learnings: LearningDetail[]; visitedUrls: string[]; breakdown: ContributionDetail[] } }
+  | { type: 'error'; error: string };
 
-type ResultUpdate = {
-  type: 'result';
-  data: {
-    report: string;
-    learnings: LearningDetail[];
-    visitedUrls: string[];
-    breakdown: ContributionDetail[];
-  };
-};
-
-type ErrorUpdate = {
-  type: 'error';
-  error: string;
-};
-
-export type ResearchUpdate = ProgressUpdate | ResultUpdate | ErrorUpdate;
+// Global in‑memory store for research requests
+const researchStore = new Map<string, { query: string; breadth: number; depth: number; feedback: string }>();
 
 /**
- * GET handler to support streaming research progress when a GET request is sent.
+ * GET handler to support streaming research progress when a researchId is provided.
  */
 export async function GET(request: Request) {
   // Parse query parameters from the URL
   const { searchParams } = new URL(request.url);
-  const query = searchParams.get('query');
-  const breadth = Number(searchParams.get('breadth'));
-  const depth = Number(searchParams.get('depth'));
-  const feedback = searchParams.get('feedback');
-
-  try {
-    // Validate parameters using our schema
-    const { query: validQuery, breadth: validBreadth, depth: validDepth, feedback: validFeedback } = researchSchema.parse({
-      query,
-      breadth,
-      depth,
-      feedback,
-    });
-
-    // If no feedback is provided, generate follow-up questions and return immediately.
-    if (!validFeedback) {
-      const questions = await generateFeedback({ query: validQuery });
-      return NextResponse.json({ questions });
+  
+  // Check for researchId
+  const researchId = searchParams.get('researchId');
+  if (researchId) {
+    const stored = researchStore.get(researchId);
+    if (!stored) {
+      return NextResponse.json({ error: 'Invalid research ID' }, { status: 400 });
     }
-
+    // Remove the stored request once retrieved
+    researchStore.delete(researchId);
+    
+    const validQuery = stored.query;
+    const validBreadth = stored.breadth;
+    const validDepth = stored.depth;
+    const validFeedback = stored.feedback;
+    
     // Create a TransformStream for sending progress updates
     const stream = new TransformStream();
     const writer = stream.writable.getWriter();
@@ -85,23 +68,18 @@ export async function GET(request: Request) {
     // Combine query and feedback for better context
     const combinedQuery = `Research Topic: ${validQuery}\nAdditional Context: ${validFeedback}`.trim();
 
-    // Start the research process in the background
+    // Start the research process!
     (async () => {
       try {
-        // Perform the deep research process with progress tracking
         const researchResult = await deepResearch({
           query: combinedQuery,
           breadth: validBreadth,
           depth: validDepth,
           onProgress: (progress) => {
-            sendUpdate({
-              type: 'progress',
-              data: progress,
-            });
+            sendUpdate({ type: 'progress', data: progress });
           },
         });
 
-        // Generate the final report
         const report = await writeFinalReport({
           prompt: combinedQuery,
           learnings: researchResult!.learnings,
@@ -109,16 +87,17 @@ export async function GET(request: Request) {
         });
 
         // Save the report to a Markdown file.
-        // First, try to extract a title from the report (assumes first markdown header is the title)
         const titleMatch = report.match(/^#\s+(.*)/m);
         const titleForFile = titleMatch?.[1]?.trim() || validQuery;
-        // Create a safe filename by replacing non-alphanumeric characters. You can also append a timestamp if needed.
         const safeReportName = titleForFile.replace(/[^a-z0-9]+/gi, '-').toLowerCase();
         const filename = `${safeReportName || 'report'}.md`;
-        await fs.writeFile(filename, report, 'utf-8');
-        console.log(`Report saved as ${filename}`);
+        try {
+          await fs.writeFile(filename, report, 'utf-8');
+          console.log(`Report saved as ${filename}`);
+        } catch (writeError) {
+          console.warn('Failed to write report file:', writeError);
+        }
 
-        // Send the final result
         await sendUpdate({
           type: 'result',
           data: {
@@ -140,13 +119,17 @@ export async function GET(request: Request) {
     })();
 
     return response;
-  } catch (error) {
-    console.error('Research error:', error);
-    cleanup();
-    return NextResponse.json({ error: 'Failed to process research request' }, { status: 400 });
   }
+  
+  // Fallback if researchId is missing
+  return NextResponse.json({ error: 'Missing researchId parameter' }, { status: 400 });
 }
 
+/**
+ * POST handler.  
+ * If no feedback provided, returns follow‑up questions.  
+ * Otherwise, generates a short research ID and stores the research request.
+ */
 export async function POST(request: Request) {
   // Create an AbortController to handle client disconnection
   const controller = new AbortController();
@@ -156,97 +139,23 @@ export async function POST(request: Request) {
     const body = await request.json();
     const { query, breadth, depth, feedback } = researchSchema.parse(body);
 
-    // If no feedback is provided, generate follow-up questions
-    if (!feedback) {
+    // If no feedback is provided, generate follow‑up questions
+    if (!feedback || feedback.trim() === "") {
       const questions = await generateFeedback({ query });
       return NextResponse.json({ questions });
     }
-
-    // Create a TransformStream for sending progress updates
-    const stream = new TransformStream();
-    const writer = stream.writable.getWriter();
     
-    // Start the response
-    const response = new NextResponse(stream.readable, {
-      headers: {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache',
-        'Connection': 'keep-alive',
-      },
-    });
+    // Feedback is provided.
+    // Generate an 8-character random hex string
+    const randomPart = crypto.randomBytes(4).toString('hex'); // 8 hex characters
+    // Take the first 10 characters of the query (remove whitespace for safety)
+    const prefix = query.substring(0, 10).replace(/\s/g, '');
+    const researchId = `${randomPart}_${prefix}`;
 
-    // Function to send updates through the stream
-    const sendUpdate = async (update: ResearchUpdate) => {
-      try {
-        const data = JSON.stringify(update);
-        await writer.write(new TextEncoder().encode(`data: ${data}\n\n`));
-      } catch (e) {
-        console.error('Error sending update:', e);
-      }
-    };
+    // Store the research request parameters in memory.
+    researchStore.set(researchId, { query, breadth, depth, feedback });
 
-    // Handle client disconnection
-    signal.addEventListener('abort', () => {
-      cleanup();
-      writer.close();
-    });
-
-    // Combine query and feedback for better context
-    const combinedQuery = `Research Topic: ${query}\nAdditional Context: ${feedback}`.trim();
-
-    // Start the research process in the background
-    (async () => {
-      try {
-        const researchResult = await deepResearch({
-          query: combinedQuery,
-          breadth,
-          depth,
-          onProgress: (progress) => {
-            sendUpdate({
-              type: 'progress',
-              data: progress,
-            });
-          },
-        });
-
-        // Generate the final report
-        const report = await writeFinalReport({
-          prompt: combinedQuery,
-          learnings: researchResult!.learnings,
-          visitedUrls: researchResult!.visitedUrls,
-        });
-
-        // Save the report to a Markdown file.
-        // Extract the title from the report (if available) or fallback to the research query.
-        const titleMatch = report.match(/^#\s+(.*)/m);
-        const titleForFile = titleMatch?.[1]?.trim() || query;
-        const safeReportName = titleForFile.replace(/[^a-z0-9]+/gi, '-').toLowerCase();
-        const filename = `${safeReportName || 'report'}.md`;
-        await fs.writeFile(filename, report, 'utf-8');
-        console.log(`Report saved as ${filename}`);
-
-        // Send the final result
-        await sendUpdate({
-          type: 'result',
-          data: {
-            report,
-            learnings: researchResult.learnings,
-            visitedUrls: researchResult.visitedUrls,
-            breakdown: researchResult.breakdown,
-          },
-        });
-      } catch (error) {
-        await sendUpdate({
-          type: 'error',
-          error: error instanceof Error ? error.message : 'Unknown error occurred',
-        });
-      } finally {
-        cleanup();
-        await writer.close();
-      }
-    })();
-
-    return response;
+    return NextResponse.json({ researchId });
   } catch (error) {
     console.error('Research error:', error);
     cleanup();

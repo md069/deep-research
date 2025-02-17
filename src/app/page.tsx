@@ -207,25 +207,41 @@ export default function Home() {
     if (eventSourceRef.current) {
       eventSourceRef.current.close();
     }
-
+    
     try {
       const feedback = questions
         .map((q, i) => `Q: ${q}\nA: ${answers[i] || 'No answer provided'}`)
         .join('\n\n');
 
-      // Create new EventSource for progress updates
-      const es = new EventSource(`/api/research?${new URLSearchParams({
-        query,
-        breadth: breadth.toString(),
-        depth: depth.toString(),
-        feedback,
-      }).toString()}`);
-      
+      // POST the research request and get a short researchId in return
+      const res = await fetch('/api/research', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          query,
+          breadth,
+          depth,
+          feedback,
+        }),
+      });
+
+      if (!res.ok) {
+        throw new Error('Failed to create research request');
+      }
+
+      const data = await res.json();
+      const researchId = data.researchId;
+      if (!researchId) {
+        throw new Error('Missing research ID in response');
+      }
+
+      // Now open an EventSource connection using just the researchId
+      const es = new EventSource(`/api/research?${new URLSearchParams({ researchId }).toString()}`);
       eventSourceRef.current = es;
 
       es.onmessage = (event) => {
         const update = JSON.parse(event.data);
-        
+
         switch (update.type) {
           case 'progress':
             const progress = update.data as ResearchProgress;
@@ -245,7 +261,7 @@ export default function Home() {
               currentQuery: progress.currentQuery,
             });
             break;
-          
+
           case 'result':
             setReport(update.data.report);
             setLearnings(update.data.learnings);
@@ -253,7 +269,7 @@ export default function Home() {
             setStep('report');
             es.close();
             break;
-          
+
           case 'error':
             setError(update.error);
             setStep('home');
